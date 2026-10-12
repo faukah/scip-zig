@@ -23,8 +23,8 @@ stdenv.mkDerivation {
 
   nativeBuildInputs = [ zig.hook ];
 
-  # resolve `@import("std")` against the std of the zig we were built with
-  zigBuildFlags = [ "-Dzig-std-dir=${zig}/lib/zig/std" ];
+  # std is installed alongside; zig itself, LLVM and all, must not be needed to run
+  disallowedReferences = [ zig ];
 
   # several releases can share a PATH, picked by the zig version a project wants
   postInstall = ''

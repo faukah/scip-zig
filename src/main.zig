@@ -28,7 +28,8 @@ const usage =
     \\  --package-name <name>    package name in symbols (default: from build.zig.zon)
     \\  --package-version <ver>  package version in symbols (default: from build.zig.zon)
     \\  --zig-std-dir <dir>      std sources to resolve @import("std") against
-    \\                           (default: {s})
+    \\                           (default: the std installed with scip-zig,
+    \\                           else `zig env`'s)
     \\  -h, --help               show this help
     \\  --version                show the version
     \\
@@ -40,7 +41,7 @@ const Options = struct {
     modules: std.ArrayList([]const u8) = .empty,
     package_name: ?[]const u8 = null,
     package_version: ?[]const u8 = null,
-    zig_std_dir: ?[]const u8 = build_options.zig_std_dir,
+    zig_std_dir: ?[]const u8 = null,
 };
 
 /// directories never indexed, besides hidden ones
@@ -119,7 +120,7 @@ fn run(arena: Allocator, io: Io, options: Options, arguments: []const []const u8
         options.package_version orelse manifest.version orelse "",
     );
 
-    if (options.zig_std_dir orelse zigEnvStdDir(arena, io)) |std_dir| {
+    if (options.zig_std_dir orelse installedStdDir(arena, io) orelse zigEnvStdDir(arena, io)) |std_dir| {
         const std_root = try Analyzer.normalize(arena, try absolute(arena, io, std_dir));
         const std_package = try analyzer.addPackage(std_root, "std", builtin.zig_version_string);
         try analyzer.addModule("std", try std.fs.path.join(arena, &.{ std_root, "std.zig" }), std_package);
@@ -250,6 +251,15 @@ fn readManifest(arena: Allocator, io: Io, root: []const u8) Manifest {
     return manifest;
 }
 
+/// the std installed with scip-zig: `lib/zig/std` beside the `bin` it runs from
+fn installedStdDir(arena: Allocator, io: Io) ?[]const u8 {
+    const bin = std.process.executableDirPathAlloc(io, arena) catch return null;
+    const dir = std.fs.path.join(arena, &.{ bin, "..", "lib", "zig", "std" }) catch return null;
+    const root = std.fs.path.join(arena, &.{ dir, "std.zig" }) catch return null;
+    Io.Dir.accessAbsolute(io, root, .{}) catch return null;
+    return dir;
+}
+
 /// the `.std_dir` reported by `zig env`
 fn zigEnvStdDir(arena: Allocator, io: Io) ?[]const u8 {
     const result = std.process.run(arena, io, .{ .argv = &.{ "zig", "env" } }) catch return null;
@@ -266,7 +276,7 @@ fn absolute(arena: Allocator, io: Io, path: []const u8) ![]const u8 {
 }
 
 fn usageText(arena: Allocator) ![]const u8 {
-    return std.fmt.allocPrint(arena, usage, .{ builtin.zig_version_string, build_options.zig_std_dir orelse "`zig env`" });
+    return std.fmt.allocPrint(arena, usage, .{builtin.zig_version_string});
 }
 
 fn eql(a: []const u8, b: []const u8) bool {
