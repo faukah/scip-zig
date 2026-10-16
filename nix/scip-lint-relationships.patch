@@ -1,0 +1,20 @@
+lint: check document relationships after populating every document
+
+The relationship pass ran inside the same loop over documents that
+populates their symbols, so relationships to a symbol defined in a later
+document were reported missing, depending on map iteration order.
+
+diff --git a/cmd/scip/lint.go b/cmd/scip/lint.go
+index 1f246e5320..12b399b0a3 100644
+--- a/cmd/scip/lint.go
++++ b/cmd/scip/lint.go
+@@ -74,6 +74,9 @@ func lintMainPure(scipIndex *scip.Index) errorSet {
+ 				errs.Add(err)
+ 			}
+ 		}
++	}
++
++	for path, doc := range docMap {
+ 		for _, sym := range doc.Symbols {
+ 			for _, rel := range sym.Relationships {
+ 				// This has to run in a second pass so that all symbols are first populated.

@@ -116,48 +116,107 @@ pub const SymbolRole = struct {
     pub const read_access: u32 = 0x8;
     pub const generated: u32 = 0x10;
     pub const @"test": u32 = 0x20;
+    pub const forward_definition: u32 = 0x40;
 };
 
 pub const Occurrence = struct {
     range: Range,
-    symbol: []const u8,
+    /// empty for occurrences that only carry diagnostics
+    symbol: []const u8 = "",
     symbol_roles: u32 = 0,
+    syntax_kind: SyntaxKind = .unspecified,
+    diagnostics: []const Diagnostic = &.{},
     enclosing_range: ?Range = null,
 
     pub fn encode(self: Occurrence, e: *Encoder) Error!void {
         try e.string(2, self.symbol);
         try e.uint(3, self.symbol_roles);
+        try e.uint(5, @intFromEnum(self.syntax_kind));
+        try e.repeatedMessage(6, self.diagnostics);
         try self.range.encodeTyped(e, 8, 9);
         if (self.enclosing_range) |range| try range.encodeTyped(e, 10, 11);
+    }
+};
+
+pub const SyntaxKind = enum(u32) {
+    unspecified = 0,
+    identifier = 6,
+    identifier_constant = 9,
+    identifier_mutable_global = 10,
+    identifier_parameter = 11,
+    identifier_local = 12,
+    identifier_namespace = 14,
+    identifier_function = 15,
+    identifier_function_definition = 16,
+    identifier_type = 19,
+    string_literal = 27,
+};
+
+pub const Diagnostic = struct {
+    severity: Severity,
+    message: []const u8,
+
+    pub const Severity = enum(u32) {
+        unspecified = 0,
+        @"error" = 1,
+        warning = 2,
+        information = 3,
+        hint = 4,
+    };
+
+    pub fn encode(self: Diagnostic, e: *Encoder) Error!void {
+        try e.uint(1, @intFromEnum(self.severity));
+        try e.string(3, self.message);
+        try e.string(4, "zig");
     }
 };
 
 pub const SymbolInformation = struct {
     symbol: []const u8,
     documentation: []const []const u8 = &.{},
+    relationships: []const Relationship = &.{},
     kind: Kind = .unspecified,
     display_name: []const u8 = "",
-    /// rendered as a zig code block by consumers
-    signature: ?[]const u8 = null,
+    signature: ?Signature = null,
     enclosing_symbol: []const u8 = "",
 
     pub fn encode(self: SymbolInformation, e: *Encoder) Error!void {
         try e.string(1, self.symbol);
         try e.repeatedString(3, self.documentation);
+        try e.repeatedMessage(4, self.relationships);
         try e.uint(5, @intFromEnum(self.kind));
         try e.string(6, self.display_name);
-        if (self.signature) |text| try e.message(7, Signature{ .text = text });
+        if (self.signature) |signature| try e.message(7, signature);
         try e.string(8, self.enclosing_symbol);
     }
 };
 
-/// a `Document` message carrying only language and text
-const Signature = struct {
+/// rendered as a zig code block by consumers
+pub const Signature = struct {
     text: []const u8,
+    /// references within `text`, with ranges relative to it
+    occurrences: []const Occurrence = &.{},
 
     pub fn encode(self: Signature, e: *Encoder) Error!void {
+        try e.repeatedMessage(2, self.occurrences);
         try e.string(4, language);
         try e.string(5, self.text);
+    }
+};
+
+pub const Relationship = struct {
+    symbol: []const u8,
+    is_reference: bool = false,
+    is_implementation: bool = false,
+    is_type_definition: bool = false,
+    is_definition: bool = false,
+
+    pub fn encode(self: Relationship, e: *Encoder) Error!void {
+        try e.string(1, self.symbol);
+        try e.boolean(2, self.is_reference);
+        try e.boolean(3, self.is_implementation);
+        try e.boolean(4, self.is_type_definition);
+        try e.boolean(5, self.is_definition);
     }
 };
 
@@ -174,6 +233,9 @@ pub const Kind = enum(u32) {
     parameter = 37,
     @"struct" = 49,
     type = 54,
+    type_parameter = 58,
     @"union" = 59,
     variable = 61,
+    @"error" = 63,
+    static_method = 80,
 };

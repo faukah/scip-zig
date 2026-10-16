@@ -15,6 +15,7 @@
         "aarch64-darwin"
       ];
       pkgsFor = system: nixpkgs.legacyPackages.${system};
+      scipFor = pkgs: pkgs.callPackage ./nix/scip.nix { };
 
       zigVersions = {
         "0_16" = "0.16";
@@ -66,7 +67,12 @@
           pkgs = pkgsFor system;
           shells = lib.mapAttrs' (
             suffix: _:
-            lib.nameValuePair "zig_${suffix}" (pkgs.callPackage ./nix/shell.nix { zig = zigFor pkgs suffix; })
+            lib.nameValuePair "zig_${suffix}" (
+              pkgs.callPackage ./nix/shell.nix {
+                zig = zigFor pkgs suffix;
+                scip = scipFor pkgs;
+              }
+            )
           ) zigVersions;
         in
         shells
@@ -83,7 +89,10 @@
           smoke = lib.mapAttrs' (
             name: scip-zig:
             lib.nameValuePair "smoke-${lib.removePrefix "scip-zig_" name}" (
-              pkgs.callPackage ./nix/smoke.nix { inherit scip-zig; }
+              pkgs.callPackage ./nix/smoke.nix {
+                inherit scip-zig;
+                scip = scipFor pkgs;
+              }
             )
           ) builds;
         in

@@ -1,0 +1,24 @@
+lint: keep relationships of local symbols apart per document
+
+Local symbols are scoped to their document, but relationships were
+deduplicated by symbol across the whole index, so `local 0` relating to
+the same symbol in two documents was reported as a duplicate.
+
+diff --git a/cmd/scip/lint.go b/cmd/scip/lint.go
+index 12b399b0a3..02173e295a 100644
+--- a/cmd/scip/lint.go
++++ b/cmd/scip/lint.go
+@@ -194,7 +194,12 @@ func (st *symbolTable) addRelationship(sym string, path string, rel *scip.Relati
+ 			}
+ 		}
+ 	}
+-	relPair := pair[string]{sym, rel.Symbol}
++	// local symbols are scoped to their document
++	key := sym
++	if scip.IsLocalSymbol(sym) {
++		key = path + "\x00" + sym
++	}
++	relPair := pair[string]{key, rel.Symbol}
+ 	if st.relsMap.Contains(relPair) {
+ 		return multipleRelationshipWarning{sym, rel.Symbol}
+ 	}

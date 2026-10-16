@@ -26,7 +26,7 @@ arena: Allocator,
 io: Io,
 packages: std.ArrayList(Package) = .empty,
 file_by_path: std.StringHashMapUnmanaged(*File) = .empty,
-/// `@import("name")` targets
+/// `@import("name")` targets of every package, like std
 modules: std.StringHashMapUnmanaged(Module) = .empty,
 
 pub const Package = struct {
@@ -34,6 +34,8 @@ pub const Package = struct {
     root: []const u8,
     /// `scip-zig zig <name> <version> `
     prefix: []const u8,
+    /// `@import("name")` targets of the package's own files
+    modules: std.StringHashMapUnmanaged(Module) = .empty,
 };
 
 pub const Module = struct {
@@ -57,9 +59,12 @@ pub const File = struct {
     decls: std.ArrayList(Decl) = .empty,
     decl_at: std.AutoHashMapUnmanaged(TokenIndex, u32) = .empty,
     container_scope: std.AutoHashMapUnmanaged(Node.Index, u32) = .empty,
+    /// the files `@import` string literals resolved to, null if none
+    imported: std.AutoHashMapUnmanaged(Node.Index, ?*File) = .empty,
     next_local: u32 = 0,
-    /// part of the indexed project, gets a SCIP document
-    document: bool = false,
+    /// path relative to the project root of files in the indexed project,
+    /// which get a SCIP document
+    document: ?[]const u8 = null,
 
     pub fn tokenName(file: *const File, token: TokenIndex) []const u8 {
         return identifierName(file.tree.tokenSlice(token));
@@ -85,6 +90,9 @@ pub const Container = struct {
     /// symbol of the container, members append their descriptor to it.
     /// null for containers without a stable name, whose members are locals.
     symbol: ?[]const u8 = null,
+    /// the declaration it's the value of, sharing its symbol. null for
+    /// files and for containers returned by functions.
+    decl: ?u32 = null,
 
     pub const Kind = enum { file, @"struct", @"enum", @"union", @"opaque" };
 };
@@ -103,6 +111,8 @@ pub const Decl = struct {
     /// for parameters, the fn decl they belong to and their position
     owner: Node.OptionalIndex = .none,
     param_index: u32 = 0,
+    /// `extern`, defined elsewhere
+    forward: bool = false,
     symbol: []const u8 = "",
 
     pub const Kind = enum {
@@ -112,7 +122,16 @@ pub const Decl = struct {
         field,
         param,
         capture,
+        label,
+        @"test",
     };
+
+    /// the key a declaration is visible by in `Scope.names`, labels live
+    /// apart from other names
+    pub fn key(arena: Allocator, kind: Kind, name: []const u8) Allocator.Error![]const u8 {
+        if (kind != .label) return name;
+        return std.fmt.allocPrint(arena, ":{s}", .{name});
+    }
 };
 
 pub const Ref = struct {
@@ -179,8 +198,21 @@ pub fn addPackage(a: *Analyzer, root: []const u8, name: []const u8, version: []c
     return @intCast(a.packages.items.len - 1);
 }
 
-pub fn addModule(a: *Analyzer, name: []const u8, root_file: []const u8, package: u32) Allocator.Error!void {
-    try a.modules.put(a.arena, name, .{ .root_file = root_file, .package = package });
+/// makes `@import(name)` load `root_file` as part of `package`, from the
+/// files of `importer`, or from every file without one
+/// the package whose root is the longest prefix of `path`, if any
+pub fn packageOf(a: *const Analyzer, path: []const u8) ?u32 {
+    var best: ?u32 = null;
+    for (a.packages.items, 0..) |package, i| {
+        if (!std.mem.startsWith(u8, path, package.root) or path.len <= package.root.len or path[package.root.len] != '/') continue;
+        if (best == null or package.root.len > a.packages.items[best.?].root.len) best = @intCast(i);
+    }
+    return best;
+}
+
+pub fn addModule(a: *Analyzer, importer: ?u32, name: []const u8, root_file: []const u8, package: u32) Allocator.Error!void {
+    const modules = if (importer) |index| &a.packages.items[index].modules else &a.modules;
+    try modules.put(a.arena, name, .{ .root_file = root_file, .package = package });
 }
 
 /// loads, parses and collects the declarations of `path`, which must be
@@ -260,7 +292,7 @@ fn addDecl(a: *Analyzer, file: *File, decl: Decl) Allocator.Error!u32 {
 fn addLocal(a: *Analyzer, file: *File, decl: Decl, end: TokenIndex) Allocator.Error!void {
     const index = try a.addDecl(file, decl);
     var scope: Scope = .{ .start = decl.name_token, .end = end };
-    try scope.names.put(a.arena, decl.name, index);
+    try scope.names.put(a.arena, try Decl.key(a.arena, decl.kind, decl.name), index);
     _ = try a.addScope(file, scope);
 }
 
@@ -296,7 +328,16 @@ fn collect(a: *Analyzer, file: *File) !void {
                 try a.addContainer(file, node, kind, decl.ast.members, tree.firstToken(node), tree.lastToken(node));
             },
             .fn_decl => try a.collectParams(file, node),
-            .block, .block_semicolon, .block_two, .block_two_semicolon => try a.collectBlock(file, node),
+            .block, .block_semicolon, .block_two, .block_two_semicolon => {
+                const first = tree.firstToken(node);
+                if (tree.tokenTag(first) == .identifier and tree.tokenTag(first + 1) == .colon) {
+                    try a.addLabel(file, first, tree.lastToken(node));
+                }
+                try a.collectBlock(file, node);
+            },
+            .@"switch", .switch_comma => {
+                if (tree.fullSwitch(node).?.label_token) |token| try a.addLabel(file, token, tree.lastToken(node));
+            },
             .@"if", .if_simple => {
                 const full = tree.fullIf(node).?;
                 if (full.payload_token) |token| {
@@ -310,6 +351,7 @@ fn collect(a: *Analyzer, file: *File) !void {
             },
             .@"while", .while_simple, .while_cont => {
                 const full = tree.fullWhile(node).?;
+                if (full.label_token) |token| try a.addLabel(file, token, tree.lastToken(node));
                 if (full.payload_token) |token| {
                     try a.addCaptures(file, token, full.ast.cond_expr, tree.lastToken(full.ast.then_expr));
                 }
@@ -321,6 +363,7 @@ fn collect(a: *Analyzer, file: *File) !void {
             },
             .@"for", .for_simple => {
                 const full = tree.fullFor(node).?;
+                if (full.label_token) |token| try a.addLabel(file, token, tree.lastToken(node));
                 try a.addForCaptures(file, full.payload_token, full.ast.inputs, tree.lastToken(full.ast.then_expr));
             },
             .switch_case, .switch_case_one, .switch_case_inline, .switch_case_inline_one => {
@@ -341,7 +384,7 @@ fn collect(a: *Analyzer, file: *File) !void {
     }
 
     try a.sortScopes(file);
-    try a.nameContainer(file, 0, file.symbol);
+    try a.nameContainer(file, 0, file.symbol, null);
     for (file.decls.items) |*decl| {
         if (decl.symbol.len == 0) decl.symbol = try a.declSymbol(file, decl);
     }
@@ -366,7 +409,8 @@ fn addContainer(
 
     for (members) |member_node| {
         var decl: Decl = switch (tree.nodeTag(member_node)) {
-            .fn_decl => blk: {
+            // bodiless protos are `extern` functions
+            .fn_decl, .fn_proto_simple, .fn_proto_multi, .fn_proto_one, .fn_proto => blk: {
                 var buf: [1]Node.Index = undefined;
                 const proto = tree.fullFnProto(&buf, member_node).?;
                 const name_token = proto.name_token orelse continue;
@@ -374,6 +418,20 @@ fn addContainer(
                     .name = file.tokenName(name_token),
                     .name_token = name_token,
                     .kind = .function,
+                    .node = member_node.toOptional(),
+                    .forward = isExtern(tree, proto.extern_export_inline_token),
+                };
+            },
+            .test_decl => blk: {
+                // `test "name"` is named by its string, a decltest `test name`
+                // by its `test` keyword, since `name` refers to the decl tested
+                const name_token = tree.nodeData(member_node).opt_token_and_node[0].unwrap();
+                const keyword = tree.nodeMainToken(member_node);
+                const is_string = if (name_token) |token| tree.tokenTag(token) == .string_literal else false;
+                break :blk .{
+                    .name = if (name_token) |token| try std.fmt.allocPrint(a.arena, "test {s}", .{tree.tokenSlice(token)}) else "test",
+                    .name_token = if (is_string) name_token.? else keyword,
+                    .kind = .@"test",
                     .node = member_node.toOptional(),
                 };
             },
@@ -387,6 +445,7 @@ fn addContainer(
                     .node = member_node.toOptional(),
                     .type_node = var_decl.ast.type_node,
                     .init_node = var_decl.ast.init_node,
+                    .forward = isExtern(tree, var_decl.extern_export_token),
                 };
             },
             .container_field_init, .container_field_align, .container_field => blk: {
@@ -411,11 +470,26 @@ fn addContainer(
         const index = try a.addDecl(file, decl);
         // the scope list may have grown, so look the container up again
         const scope = &file.scopes.items[scope_index];
+        // tests can't be referred to
+        if (decl.kind == .@"test") continue;
         // fields are only reachable through a value or the type, never by bare name
         if (decl.kind != .field) try scope.names.put(a.arena, decl.name, index);
         try scope.container.?.members.put(a.arena, decl.name, index);
         try scope.container.?.member_list.append(a.arena, index);
     }
+}
+
+fn isExtern(tree: *const Ast, token: ?TokenIndex) bool {
+    return tree.tokenTag(token orelse return false) == .keyword_extern;
+}
+
+/// `name:` of a block, loop or switch, visible until `end`
+fn addLabel(a: *Analyzer, file: *File, token: TokenIndex, end: TokenIndex) !void {
+    try a.addLocal(file, .{
+        .name = file.tokenName(token),
+        .name_token = token,
+        .kind = .label,
+    }, end);
 }
 
 fn collectParams(a: *Analyzer, file: *File, fn_decl: Node.Index) !void {
@@ -545,11 +619,12 @@ fn sortScopes(a: *Analyzer, file: *File) !void {
 
 /// gives stable symbols to containers reachable through named declarations,
 /// including `fn Generic(...) type { return struct { ... }; }`
-fn nameContainer(a: *Analyzer, file: *File, scope_index: u32, container_symbol: []const u8) !void {
+fn nameContainer(a: *Analyzer, file: *File, scope_index: u32, container_symbol: []const u8, named_by: ?u32) !void {
     const tree = &file.tree;
     const container = &file.scopes.items[scope_index].container.?;
     if (container.symbol != null) return;
     container.symbol = container_symbol;
+    container.decl = named_by;
 
     for (container.member_list.items) |decl_index| {
         const decl = file.decls.items[decl_index];
@@ -560,12 +635,13 @@ fn nameContainer(a: *Analyzer, file: *File, scope_index: u32, container_symbol: 
         };
         const child_scope = file.container_scope.get(child_node) orelse continue;
         const child_symbol = try symbol.withDescriptor(a.arena, container_symbol, decl.name, .type);
-        try a.nameContainer(file, child_scope, child_symbol);
+        try a.nameContainer(file, child_scope, child_symbol, if (decl.kind == .function) null else decl_index);
     }
 }
 
 /// the operand of `return` if it's the first one among a fn body's statements
 fn returnedExpression(tree: *const Ast, fn_decl: Node.Index) ?Node.Index {
+    if (tree.nodeTag(fn_decl) != .fn_decl) return null;
     const body = tree.nodeData(fn_decl).node_and_node[1];
     var buf: [2]Node.Index = undefined;
     const statements = tree.blockStatements(&buf, body) orelse return null;
@@ -581,11 +657,17 @@ fn declSymbol(a: *Analyzer, file: *File, decl: *const Decl) Allocator.Error![]co
             const suffix: symbol.Suffix = switch (decl.kind) {
                 .function => .method,
                 .constant, .variable => if (initIsType(file, decl)) .type else .term,
+                // unnamed tests can't be told apart
+                .@"test" => if (std.mem.eql(u8, decl.name, "test")) return a.nextLocal(file) else .term,
                 else => .term,
             };
             return symbol.withDescriptor(a.arena, prefix, decl.name, suffix);
         }
     }
+    return a.nextLocal(file);
+}
+
+fn nextLocal(a: *Analyzer, file: *File) Allocator.Error![]const u8 {
     defer file.next_local += 1;
     return symbol.local(a.arena, file.next_local);
 }
@@ -598,6 +680,7 @@ pub fn initIsType(file: *const File, decl: *const Decl) bool {
     const tree = &file.tree;
     return switch (tree.nodeTag(init_node)) {
         .builtin_call_two, .builtin_call_two_comma => std.mem.eql(u8, tree.tokenSlice(tree.nodeMainToken(init_node)), "@This"),
+        .error_set_decl, .merge_error_sets => true,
         else => false,
     };
 }
@@ -700,6 +783,10 @@ fn containerOfDepth(a: *Analyzer, file: *File, node: Node.Index, env: ?*const En
             if (std.mem.eql(u8, name, "@as") or std.mem.eql(u8, name, "@TypeOf")) {
                 return a.containerOfDepth(file, params[0], env, next);
             }
+            if (std.mem.eql(u8, name, "@field")) {
+                const ref = a.fieldDepth(file, node, env, next) orelse return null;
+                return a.containerOfDecl(ref, next);
+            }
             return null;
         },
         .call, .call_comma, .call_one, .call_one_comma => {
@@ -772,6 +859,70 @@ fn containerOfDecl(a: *Analyzer, ref: Ref, depth: u32) ?Target {
         return a.containerOfDepth(ref.file, init_node, ref.env, depth);
     }
     return null;
+}
+
+/// the member `@field(value, "name")` accesses, for a literal name
+pub fn fieldOf(a: *Analyzer, file: *File, node: Node.Index) ?Ref {
+    return a.fieldDepth(file, node, null, 0);
+}
+
+fn fieldDepth(a: *Analyzer, file: *File, node: Node.Index, env: ?*const Env, depth: u32) ?Ref {
+    const tree = &file.tree;
+    var buf: [2]Node.Index = undefined;
+    const params = tree.builtinCallParams(&buf, node) orelse return null;
+    if (params.len != 2 or tree.nodeTag(params[1]) != .string_literal) return null;
+    const literal = tree.tokenSlice(tree.nodeMainToken(params[1]));
+    const target = a.containerOfDepth(file, params[0], env, depth + 1) orelse return null;
+    return member(target, literal[1 .. literal.len - 1]);
+}
+
+/// the container the type of a value declaration is, for "go to type
+/// definition". types, namespaces and functions have none.
+pub fn typeOf(a: *Analyzer, ref: Ref) ?Target {
+    switch (ref.get().kind) {
+        .function, .label, .@"test" => return null,
+        else => {},
+    }
+    if (a.isTypeDecl(ref, 0)) return null;
+    return a.containerOfDecl(ref, 0);
+}
+
+/// whether a declaration names a type or namespace rather than a value
+pub fn isType(a: *Analyzer, ref: Ref) bool {
+    return a.isTypeDecl(ref, 0);
+}
+
+/// whether a function's first parameter is its own container, so that it
+/// can be called as a method
+pub fn takesSelf(a: *Analyzer, file: *File, decl: *const Decl) bool {
+    const scope = decl.container orelse return false;
+    const tree = &file.tree;
+    var buf: [1]Node.Index = undefined;
+    const proto = tree.fullFnProto(&buf, decl.node.unwrap() orelse return false) orelse return false;
+    var it = proto.iterate(tree);
+    const first = it.next() orelse return false;
+    const target = a.containerOf(file, first.type_expr orelse return false) orelse return false;
+    return target.file == file and target.scope == scope;
+}
+
+/// whether an expression denotes an error set, `error{...}` or a name of one
+pub fn isErrorSet(a: *Analyzer, file: *File, node: Node.Index) bool {
+    return a.isErrorSetDepth(file, node, 0);
+}
+
+fn isErrorSetDepth(a: *Analyzer, file: *File, node: Node.Index, depth: u32) bool {
+    if (depth > max_depth) return false;
+    const tree = &file.tree;
+    switch (tree.nodeTag(node)) {
+        .error_set_decl, .merge_error_sets => return true,
+        .identifier, .field_access => {
+            const ref = a.resolveDeclDepth(file, node, null, depth + 1) orelse return false;
+            const decl = ref.get();
+            if (decl.kind != .constant) return false;
+            return a.isErrorSetDepth(ref.file, decl.init_node.unwrap() orelse return false, depth + 1);
+        },
+        else => return false,
+    }
 }
 
 /// the function `node` names, following `const alias = other.function;`
@@ -874,6 +1025,12 @@ fn returnContainer(a: *Analyzer, ref: Ref, env: *const Env, depth: u32) ?Target 
 
 /// the file an `@import` string literal points at
 pub fn importFile(a: *Analyzer, file: *File, string_node: Node.Index) ?*File {
+    const entry = file.imported.getOrPut(a.arena, string_node) catch return a.resolveImport(file, string_node);
+    if (!entry.found_existing) entry.value_ptr.* = a.resolveImport(file, string_node);
+    return entry.value_ptr.*;
+}
+
+fn resolveImport(a: *Analyzer, file: *File, string_node: Node.Index) ?*File {
     const tree = &file.tree;
     if (tree.nodeTag(string_node) != .string_literal) return null;
     const literal = tree.tokenSlice(tree.nodeMainToken(string_node));
@@ -886,6 +1043,6 @@ pub fn importFile(a: *Analyzer, file: *File, string_node: Node.Index) ?*File {
         const path = normalize(a.arena, joined) catch return null;
         return a.loadFile(path, file.package) catch null;
     }
-    const module = a.modules.get(name) orelse return null;
+    const module = a.packages.items[file.package].modules.get(name) orelse a.modules.get(name) orelse return null;
     return a.loadFile(module.root_file, module.package) catch null;
 }

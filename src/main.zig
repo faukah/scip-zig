@@ -10,6 +10,7 @@ const Io = std.Io;
 const Analyzer = @import("Analyzer.zig");
 const build_scan = @import("build_scan.zig");
 const Emitter = @import("Emitter.zig");
+const manifest = @import("manifest.zig");
 const Encoder = @import("protobuf.zig").Encoder;
 const scip = @import("scip.zig");
 
@@ -18,6 +19,10 @@ const usage =
     \\
     \\Index every .zig file below the project root into a SCIP index.
     \\This build parses zig {s} source.
+    \\
+    \\Dependencies in build.zig.zon are read from where `zig build` unpacks
+    \\them, zig-pkg/ in the project root or $ZIG_LOCAL_PKG_DIR, so run
+    \\`zig build --fetch` first.
     \\
     \\options:
     \\  --project-root <dir>     project to index (default: .)
@@ -100,52 +105,62 @@ fn mainInner(init: std.process.Init) !void {
         }
     }
 
-    const index = try run(arena, io, options, args[1..]);
+    const index = try run(arena, io, init.environ_map, options, args[1..]);
     var encoder: Encoder = .init(arena);
     try index.encode(&encoder);
     try Io.Dir.cwd().writeFile(io, .{ .sub_path = options.output, .data = encoder.buf.items });
 }
 
-fn run(arena: Allocator, io: Io, options: Options, arguments: []const []const u8) !scip.Index {
+fn run(arena: Allocator, io: Io, environ: *const std.process.Environ.Map, options: Options, arguments: []const []const u8) !scip.Index {
     const root = Io.Dir.cwd().realPathFileAlloc(io, options.project_root, arena) catch |err| {
         return fail("cannot open project root '{s}': {t}", .{ options.project_root, err });
     };
 
     var analyzer: Analyzer = .{ .arena = arena, .io = io };
 
-    const manifest = readManifest(arena, io, root);
+    const project_manifest = manifest.read(arena, io, root);
     const project = try analyzer.addPackage(
         root,
-        options.package_name orelse manifest.name orelse std.fs.path.basename(root),
-        options.package_version orelse manifest.version orelse "",
+        options.package_name orelse project_manifest.name orelse std.fs.path.basename(root),
+        options.package_version orelse project_manifest.version orelse "",
     );
 
     if (options.zig_std_dir orelse installedStdDir(arena, io) orelse zigEnvStdDir(arena, io)) |std_dir| {
         const std_root = try Analyzer.normalize(arena, try absolute(arena, io, std_dir));
         const std_package = try analyzer.addPackage(std_root, "std", builtin.zig_version_string);
-        try analyzer.addModule("std", try std.fs.path.join(arena, &.{ std_root, "std.zig" }), std_package);
+        try analyzer.addModule(null, "std", try std.fs.path.join(arena, &.{ std_root, "std.zig" }), std_package);
     } else {
         std.debug.print("warning: no zig std found, references into std stay unresolved\n", .{});
     }
 
+    var packages: Packages = .{
+        .analyzer = &analyzer,
+        .arena = arena,
+        .io = io,
+        .pkg_dir = if (environ.get("ZIG_LOCAL_PKG_DIR")) |dir|
+            try Analyzer.normalize(arena, try absolute(arena, io, dir))
+        else
+            try std.fs.path.join(arena, &.{ root, "zig-pkg" }),
+    };
+    try packages.roots.put(arena, root, project);
+    try packages.addModules(project, root, project_manifest);
     // flags come last, so they override what build.zig declares
-    for (try build_scan.modules(arena, io, root)) |module| {
-        try addModule(&analyzer, project, root, module.name, try Analyzer.normalize(arena, module.root_file));
-    }
     for (options.modules.items) |spec| {
         const eq = std.mem.indexOfScalar(u8, spec, '=') orelse return fail("--module expects <name>=<path>, got '{s}'", .{spec});
         const path = try Analyzer.normalize(arena, try absolute(arena, io, spec[eq + 1 ..]));
-        try addModule(&analyzer, project, root, spec[0..eq], path);
+        try analyzer.addModule(project, spec[0..eq], path, try packages.fileModule(project, root, spec[0..eq], path));
     }
 
     const paths = try projectFiles(arena, io, root);
     var files: std.ArrayList(*Analyzer.File) = .empty;
     for (paths) |path| {
-        const file = analyzer.loadFile(path, project) catch |err| {
+        // files of dependencies inside the project, like a path dependency in
+        // a subdirectory, keep the dependency's symbols
+        const file = analyzer.loadFile(path, analyzer.packageOf(path) orelse project) catch |err| {
             std.debug.print("warning: skipping {s}: {t}\n", .{ path, err });
             continue;
         };
-        file.document = true;
+        file.document = path[root.len + 1 ..];
         try files.append(arena, file);
     }
 
@@ -163,15 +178,84 @@ fn run(arena: Allocator, io: Io, options: Options, arguments: []const []const u8
             .project_root = try std.fmt.allocPrint(arena, "file://{s}", .{root}),
         },
         .documents = documents.items,
-        .external_symbols = emitter.externals.values(),
+        .external_symbols = try emitter.externalSymbols(),
     };
 }
 
-/// modules inside the project belong to its package, others get their own
-fn addModule(analyzer: *Analyzer, project: u32, root: []const u8, name: []const u8, path: []const u8) !void {
-    const inside = std.mem.startsWith(u8, path, root) and path.len > root.len and path[root.len] == '/';
-    const package = if (inside) project else try analyzer.addPackage(std.fs.path.dirname(path) orelse "/", name, "");
-    try analyzer.addModule(name, path, package);
+/// the packages the project depends on, through build.zig.zon, and the
+/// modules each of them declares in its build.zig
+const Packages = struct {
+    analyzer: *Analyzer,
+    arena: Allocator,
+    io: Io,
+    /// where `zig build` unpacks fetched packages
+    pkg_dir: []const u8,
+    /// package by root directory
+    roots: std.StringHashMapUnmanaged(u32) = .empty,
+    /// modules a package exports with `b.addModule`, by package
+    exports: std.AutoHashMapUnmanaged(u32, std.StringHashMapUnmanaged(Analyzer.Module)) = .empty,
+
+    /// makes the modules `root`/build.zig declares importable from `package`
+    fn addModules(p: *Packages, package: u32, root: []const u8, package_manifest: manifest.Manifest) !void {
+        var exports: std.StringHashMapUnmanaged(Analyzer.Module) = .empty;
+        for (try build_scan.modules(p.arena, p.io, root)) |module| {
+            const resolved: Analyzer.Module = switch (module.source) {
+                .file => |path| blk: {
+                    const normalized = try Analyzer.normalize(p.arena, path);
+                    break :blk .{ .root_file = normalized, .package = try p.fileModule(package, root, module.name, normalized) };
+                },
+                .dependency => |source| blk: {
+                    const dep_package = try p.dependency(root, package_manifest, source.dependency) orelse continue;
+                    const dependency_exports = p.exports.get(dep_package) orelse continue;
+                    break :blk dependency_exports.get(source.module) orelse {
+                        std.debug.print("warning: dependency '{s}' has no module '{s}'\n", .{ source.dependency, source.module });
+                        continue;
+                    };
+                },
+            };
+            try p.analyzer.addModule(package, module.name, resolved.root_file, resolved.package);
+            if (module.exported) try exports.put(p.arena, module.name, resolved);
+        }
+        try p.exports.put(p.arena, package, exports);
+    }
+
+    /// the package of a module with the root file `path`: its declaring
+    /// package if inside of it, else one of its own
+    fn fileModule(p: *Packages, package: u32, root: []const u8, name: []const u8, path: []const u8) !u32 {
+        if (inside(root, path)) return package;
+        return p.analyzer.addPackage(std.fs.path.dirname(path) orelse "/", name, "");
+    }
+
+    /// the package a dependency of `root` resolves to, loaded on first use
+    /// recursive through `addModules`, so its error set is spelled out
+    fn dependency(p: *Packages, root: []const u8, package_manifest: manifest.Manifest, name: []const u8) anyerror!?u32 {
+        const dep = for (package_manifest.dependencies) |dep| {
+            if (eql(dep.name, name)) break dep;
+        } else {
+            std.debug.print("warning: {s}/build.zig uses dependency '{s}' missing from its build.zig.zon\n", .{ root, name });
+            return null;
+        };
+        const dir = try Analyzer.normalize(p.arena, switch (dep.location) {
+            .path => |path| try std.fs.path.join(p.arena, &.{ root, path }),
+            .hash => |hash| try std.fs.path.join(p.arena, &.{ p.pkg_dir, hash }),
+        });
+        if (p.roots.get(dir)) |package| return package;
+
+        Io.Dir.cwd().access(p.io, dir, .{}) catch {
+            std.debug.print("warning: dependency '{s}' not found at {s}, run `zig build --fetch`\n", .{ name, dir });
+            return null;
+        };
+        const dep_manifest = manifest.read(p.arena, p.io, dir);
+        const package = try p.analyzer.addPackage(dir, dep_manifest.name orelse name, dep_manifest.version orelse "");
+        // before its modules, which may depend on it in a cycle
+        try p.roots.put(p.arena, dir, package);
+        try p.addModules(package, dir, dep_manifest);
+        return package;
+    }
+};
+
+fn inside(root: []const u8, path: []const u8) bool {
+    return std.mem.startsWith(u8, path, root) and path.len > root.len and path[root.len] == '/';
 }
 
 /// absolute paths of all zig files below `root`, sorted
@@ -203,52 +287,6 @@ fn projectFiles(arena: Allocator, io: Io, root: []const u8) ![]const []const u8 
         }
     }.lessThan);
     return paths.items;
-}
-
-const Manifest = struct {
-    name: ?[]const u8 = null,
-    version: ?[]const u8 = null,
-};
-
-/// top-level `.name` and `.version` of build.zig.zon, if there is one
-fn readManifest(arena: Allocator, io: Io, root: []const u8) Manifest {
-    const path = std.fs.path.join(arena, &.{ root, "build.zig.zon" }) catch return .{};
-    const source = Io.Dir.cwd().readFileAllocOptions(io, path, arena, .limited(1 << 20), .of(u8), 0) catch return .{};
-
-    var manifest: Manifest = .{};
-    var tokenizer: std.zig.Tokenizer = .init(source);
-    var depth: usize = 0;
-    var previous: [3]std.zig.Token = undefined;
-    var seen: usize = 0;
-    while (true) {
-        const token = tokenizer.next();
-        switch (token.tag) {
-            .eof => break,
-            .l_brace => depth += 1,
-            .r_brace => depth -|= 1,
-            else => {},
-        }
-        // `.field = value` at the top level
-        if (depth == 1 and seen >= 3 and previous[0].tag == .period and previous[1].tag == .identifier and previous[2].tag == .equal) {
-            const field = source[previous[1].loc.start..previous[1].loc.end];
-            const value = source[token.loc.start..token.loc.end];
-            if (eql(field, "name")) {
-                if (token.tag == .period) {
-                    const name = tokenizer.next();
-                    manifest.name = source[name.loc.start..name.loc.end];
-                } else if (token.tag == .string_literal) {
-                    manifest.name = value[1 .. value.len - 1];
-                }
-            } else if (eql(field, "version") and token.tag == .string_literal) {
-                manifest.version = value[1 .. value.len - 1];
-            }
-        }
-        previous[0] = previous[1];
-        previous[1] = previous[2];
-        previous[2] = token;
-        seen += 1;
-    }
-    return manifest;
 }
 
 /// the std installed with scip-zig: `lib/zig/std` beside the `bin` it runs from

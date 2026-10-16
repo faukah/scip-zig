@@ -7,6 +7,8 @@ const Allocator = std.mem.Allocator;
 
 pub const scheme = "scip-zig";
 pub const manager = "zig";
+/// error values, `error/<name>.` in a package without name or version
+pub const error_prefix = scheme ++ " " ++ manager ++ " . . error/";
 
 pub const Suffix = enum {
     namespace,
