@@ -18,7 +18,7 @@
       scipFor = pkgs: pkgs.callPackage ./nix/scip.nix { };
 
       # the zig release scip-zig parses source of and is built with
-      zigVersion = "0.16";
+      zigVersion = "0.17";
       zigFor = pkgs: pkgs.zigPackages.${zigVersion};
     in
     {

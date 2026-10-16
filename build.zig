@@ -29,12 +29,11 @@ pub fn build(b: *std.Build) void {
 
     const run = b.addRunArtifact(exe);
     // `zig build run -- args`
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     b.step("run", "Run scip-zig").dependOn(&run.step);
 }
 
 /// `std` in the building compiler's lib directory
-fn zigStd(b: *std.Build) std.Build.LazyPath {
-    const dir = b.graph.zig_lib_directory.join(b.allocator, &.{"std"}) catch @panic("OOM");
-    return .{ .cwd_relative = dir };
+fn zigStd(_: *std.Build) std.Build.LazyPath {
+    return .{ .relative = .{ .base = .zig_lib, .sub_path = "std" } };
 }

@@ -236,7 +236,7 @@ pub fn loadFile(a: *Analyzer, path: []const u8, package: u32) !*File {
         .rel = rel,
         .package = package,
         .source = source,
-        .tree = try Ast.parse(a.arena, source, .zig),
+        .tree = try Ast.parse(a.arena, source, .{ .mode = .zig }),
         .symbol = file_symbol.items,
     };
     try a.file_by_path.put(a.arena, path, file);
@@ -301,7 +301,7 @@ fn collect(a: *Analyzer, file: *File) !void {
     try a.addContainer(file, .root, .file, tree.rootDecls(), 0, @intCast(tree.tokens.len - 1));
 
     for (1..tree.nodes.len) |i| {
-        const node: Node.Index = @enumFromInt(i);
+        const node: Node.Index = @fromBackingInt(@intCast(i));
         switch (tree.nodeTag(node)) {
             .container_decl,
             .container_decl_trailing,

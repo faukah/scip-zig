@@ -120,7 +120,7 @@ const Scan = struct {
         const tree = &s.tree;
         // dependencies first, as modules can come from them
         for (0..tree.nodes.len) |i| {
-            const node: Node.Index = @enumFromInt(i);
+            const node: Node.Index = @fromBackingInt(@intCast(i));
             const var_decl = tree.fullVarDecl(node) orelse continue;
             const init_node = var_decl.ast.init_node.unwrap() orelse continue;
             const variable = s.name(var_decl.ast.mut_token + 1);
@@ -131,7 +131,7 @@ const Scan = struct {
             }
         }
         for (0..tree.nodes.len) |i| {
-            const node: Node.Index = @enumFromInt(i);
+            const node: Node.Index = @fromBackingInt(@intCast(i));
             const var_decl = tree.fullVarDecl(node) orelse continue;
             const init_node = var_decl.ast.init_node.unwrap() orelse continue;
             const source = s.moduleSource(init_node) orelse continue;
@@ -139,7 +139,7 @@ const Scan = struct {
         }
 
         for (0..tree.nodes.len) |i| {
-            const node: Node.Index = @enumFromInt(i);
+            const node: Node.Index = @fromBackingInt(@intCast(i));
             switch (tree.nodeTag(node)) {
                 .call, .call_comma, .call_one, .call_one_comma => {
                     var buf: [1]Node.Index = undefined;
@@ -173,7 +173,7 @@ pub fn modules(arena: Allocator, io: Io, root: []const u8) ![]const Module {
     };
     var scan: Scan = .{
         .arena = arena,
-        .tree = try Ast.parse(arena, source, .zig),
+        .tree = try Ast.parse(arena, source, .{ .mode = .zig }),
         .root = root,
     };
     try scan.run();

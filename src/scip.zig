@@ -27,7 +27,7 @@ pub const Metadata = struct {
         // field 1 (protocol version) only has the default value, so it's omitted
         try e.message(2, self.tool_info);
         try e.string(3, self.project_root);
-        try e.uint(4, @intFromEnum(TextEncoding.utf8));
+        try e.uint(4, @backingInt(TextEncoding.utf8));
     }
 };
 
@@ -59,7 +59,7 @@ pub const Document = struct {
         try e.repeatedMessage(2, self.occurrences);
         try e.repeatedMessage(3, self.symbols);
         try e.string(4, language);
-        try e.uint(6, @intFromEnum(PositionEncoding.utf8_code_unit_offset_from_line_start));
+        try e.uint(6, @backingInt(PositionEncoding.utf8_code_unit_offset_from_line_start));
     }
 };
 
@@ -131,7 +131,7 @@ pub const Occurrence = struct {
     pub fn encode(self: Occurrence, e: *Encoder) Error!void {
         try e.string(2, self.symbol);
         try e.uint(3, self.symbol_roles);
-        try e.uint(5, @intFromEnum(self.syntax_kind));
+        try e.uint(5, @backingInt(self.syntax_kind));
         try e.repeatedMessage(6, self.diagnostics);
         try self.range.encodeTyped(e, 8, 9);
         if (self.enclosing_range) |range| try range.encodeTyped(e, 10, 11);
@@ -165,7 +165,7 @@ pub const Diagnostic = struct {
     };
 
     pub fn encode(self: Diagnostic, e: *Encoder) Error!void {
-        try e.uint(1, @intFromEnum(self.severity));
+        try e.uint(1, @backingInt(self.severity));
         try e.string(3, self.message);
         try e.string(4, "zig");
     }
@@ -184,7 +184,7 @@ pub const SymbolInformation = struct {
         try e.string(1, self.symbol);
         try e.repeatedString(3, self.documentation);
         try e.repeatedMessage(4, self.relationships);
-        try e.uint(5, @intFromEnum(self.kind));
+        try e.uint(5, @backingInt(self.kind));
         try e.string(6, self.display_name);
         if (self.signature) |signature| try e.message(7, signature);
         try e.string(8, self.enclosing_symbol);

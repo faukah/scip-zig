@@ -30,7 +30,7 @@ pub const Dependency = struct {
 pub fn read(arena: Allocator, io: Io, root: []const u8) Manifest {
     const path = std.fs.path.join(arena, &.{ root, "build.zig.zon" }) catch return .{};
     const source = Io.Dir.cwd().readFileAllocOptions(io, path, arena, .limited(1 << 20), .of(u8), 0) catch return .{};
-    const tree = Ast.parse(arena, source, .zon) catch return .{};
+    const tree = Ast.parse(arena, source, .{ .mode = .zon }) catch return .{};
     if (tree.errors.len > 0) return .{};
 
     var manifest: Manifest = .{};

@@ -306,7 +306,7 @@ const Context = struct {
             .parents = try parentsOf(e.arena, tree),
         };
         for (0..tree.nodes.len) |i| {
-            const node: Node.Index = @enumFromInt(i);
+            const node: Node.Index = @fromBackingInt(@intCast(i));
             switch (tree.nodeTag(node)) {
                 .identifier, .enum_literal => try c.named.put(e.arena, tree.nodeMainToken(node), node),
                 .field_access => {
@@ -405,7 +405,7 @@ const Context = struct {
     }
 
     fn parentOf(c: *const Context, node: Node.Index) ?Node.Index {
-        return c.parents[@intFromEnum(node)].unwrap();
+        return c.parents[@backingInt(node)].unwrap();
     }
 
     /// the parent expression of a reference: the call it's the callee of,
@@ -539,7 +539,7 @@ fn parentsOf(arena: Allocator, tree: *const Ast) Allocator.Error![]Node.Optional
     const Span = struct { first: TokenIndex, last: TokenIndex, node: u32 };
     const spans = try arena.alloc(Span, tree.nodes.len - 1);
     for (spans, 1..) |*span, i| {
-        const node: Node.Index = @enumFromInt(i);
+        const node: Node.Index = @fromBackingInt(@intCast(i));
         span.* = .{ .first = tree.firstToken(node), .last = tree.lastToken(node), .node = @intCast(i) };
     }
     std.mem.sort(Span, spans, {}, struct {
@@ -555,7 +555,7 @@ fn parentsOf(arena: Allocator, tree: *const Ast) Allocator.Error![]Node.Optional
     var stack: std.ArrayList(Span) = .empty;
     for (spans) |span| {
         while (stack.items.len > 0 and stack.items[stack.items.len - 1].last < span.first) _ = stack.pop();
-        if (stack.items.len > 0) parents[span.node] = @as(Node.Index, @enumFromInt(stack.items[stack.items.len - 1].node)).toOptional();
+        if (stack.items.len > 0) parents[span.node] = @as(Node.Index, @fromBackingInt(@intCast(stack.items[stack.items.len - 1].node))).toOptional();
         try stack.append(arena, span);
     }
     return parents;
@@ -617,12 +617,12 @@ const Results = struct {
         const file = r.file;
         const tree = &file.tree;
         for (0..tree.nodes.len) |i| {
-            const node: Node.Index = @enumFromInt(i);
+            const node: Node.Index = @fromBackingInt(@intCast(i));
             if (tree.nodeTag(node) == .fn_decl) try r.fns.append(r.emitter.arena, .of(tree, node));
         }
 
         for (0..tree.nodes.len) |i| {
-            const node: Node.Index = @enumFromInt(i);
+            const node: Node.Index = @fromBackingInt(@intCast(i));
             switch (tree.nodeTag(node)) {
                 .global_var_decl, .local_var_decl, .simple_var_decl, .aligned_var_decl => {
                     const var_decl = tree.fullVarDecl(node).?;
@@ -740,7 +740,7 @@ const Results = struct {
         const label = tree.tokenSlice(first);
         const last = tree.lastToken(block);
         for (0..tree.nodes.len) |i| {
-            const node: Node.Index = @enumFromInt(i);
+            const node: Node.Index = @fromBackingInt(@intCast(i));
             if (tree.nodeTag(node) != .@"break") continue;
             const token = tree.nodeMainToken(node);
             if (token < first or token > last) continue;

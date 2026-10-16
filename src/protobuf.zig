@@ -30,7 +30,7 @@ pub const Encoder = struct {
     }
 
     fn key(e: *Encoder, field: u32, wire: WireType) Allocator.Error!void {
-        try e.varint(@as(u64, field) << 3 | @intFromEnum(wire));
+        try e.varint(@as(u64, field) << 3 | @backingInt(wire));
     }
 
     fn bytes(e: *Encoder, field: u32, data: []const u8) Allocator.Error!void {
