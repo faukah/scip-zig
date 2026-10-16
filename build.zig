@@ -28,20 +28,13 @@ pub fn build(b: *std.Build) void {
     });
 
     const run = b.addRunArtifact(exe);
-    // `zig build run -- args`, which became a method in 0.17
-    if (@hasDecl(std.Build.Step.Run, "addPassthruArgs")) {
-        run.addPassthruArgs();
-    } else if (b.args) |args| {
-        run.addArgs(args);
-    }
+    // `zig build run -- args`
+    if (b.args) |args| run.addArgs(args);
     b.step("run", "Run scip-zig").dependOn(&run.step);
 }
 
-/// `std` in the building compiler's lib directory, which 0.17 names with a lazy path of its own
+/// `std` in the building compiler's lib directory
 fn zigStd(b: *std.Build) std.Build.LazyPath {
-    if (@hasDecl(std.Build.LazyPath, "zig_lib")) {
-        return .{ .relative = .{ .base = .zig_lib, .sub_path = "std" } };
-    }
     const dir = b.graph.zig_lib_directory.join(b.allocator, &.{"std"}) catch @panic("OOM");
     return .{ .cwd_relative = dir };
 }

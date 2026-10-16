@@ -17,32 +17,18 @@
       pkgsFor = system: nixpkgs.legacyPackages.${system};
       scipFor = pkgs: pkgs.callPackage ./nix/scip.nix { };
 
-      zigVersions = {
-        "0_16" = "0.16";
-        "0_17" = "0.17";
-      };
-      defaultZig = "0_17";
-      # `zig fmt` migrates source to its own release, e.g. 0.17 rewrites
-      # `@intFromEnum` to `@backingInt`, so format with the oldest one
-      fmtZig = "0_16";
-
-      zigFor = pkgs: suffix: pkgs.zigPackages.${zigVersions.${suffix}};
+      # the zig release scip-zig parses source of and is built with
+      zigVersion = "0.16";
+      zigFor = pkgs: pkgs.zigPackages.${zigVersion};
     in
     {
       packages = forAllSystems (
         system:
         let
           pkgs = pkgsFor system;
-          builds = lib.mapAttrs' (
-            suffix: _:
-            lib.nameValuePair "scip-zig_${suffix}" (
-              pkgs.callPackage ./nix/package.nix { zig = zigFor pkgs suffix; }
-            )
-          ) zigVersions;
         in
-        builds
-        // {
-          scip-zig = builds."scip-zig_${defaultZig}";
+        {
+          scip-zig = pkgs.callPackage ./nix/package.nix { zig = zigFor pkgs; };
           default = self.packages.${system}.scip-zig;
         }
       );
@@ -65,19 +51,12 @@
         system:
         let
           pkgs = pkgsFor system;
-          shells = lib.mapAttrs' (
-            suffix: _:
-            lib.nameValuePair "zig_${suffix}" (
-              pkgs.callPackage ./nix/shell.nix {
-                zig = zigFor pkgs suffix;
-                scip = scipFor pkgs;
-              }
-            )
-          ) zigVersions;
         in
-        shells
-        // {
-          default = shells."zig_${defaultZig}";
+        {
+          default = pkgs.callPackage ./nix/shell.nix {
+            zig = zigFor pkgs;
+            scip = scipFor pkgs;
+          };
         }
       );
 
@@ -85,25 +64,19 @@
         system:
         let
           pkgs = pkgsFor system;
-          builds = lib.filterAttrs (name: _: lib.hasPrefix "scip-zig_" name) self.packages.${system};
-          smoke = lib.mapAttrs' (
-            name: scip-zig:
-            lib.nameValuePair "smoke-${lib.removePrefix "scip-zig_" name}" (
-              pkgs.callPackage ./nix/smoke.nix {
-                inherit scip-zig;
-                scip = scipFor pkgs;
-              }
-            )
-          ) builds;
+          inherit (self.packages.${system}) scip-zig;
         in
-        builds
-        // smoke
-        // {
+        {
+          inherit scip-zig;
+          smoke = pkgs.callPackage ./nix/smoke.nix {
+            inherit scip-zig;
+            scip = scipFor pkgs;
+          };
           fmt =
             pkgs.runCommand "scip-zig-fmt-check"
               {
                 nativeBuildInputs = [
-                  (zigFor pkgs fmtZig)
+                  (zigFor pkgs)
                   pkgs.nixfmt
                 ];
                 src = ./.;
@@ -126,7 +99,7 @@
         pkgs.writeShellApplication {
           name = "scip-zig-fmt";
           runtimeInputs = [
-            (zigFor pkgs fmtZig)
+            (zigFor pkgs)
             pkgs.nixfmt
             pkgs.findutils
           ];

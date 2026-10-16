@@ -16,7 +16,6 @@ const TokenIndex = Ast.TokenIndex;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const compat = @import("compat.zig");
 const symbol = @import("symbol.zig");
 
 const Analyzer = @This();
@@ -237,7 +236,7 @@ pub fn loadFile(a: *Analyzer, path: []const u8, package: u32) !*File {
         .rel = rel,
         .package = package,
         .source = source,
-        .tree = try compat.parse(a.arena, source, .zig),
+        .tree = try Ast.parse(a.arena, source, .zig),
         .symbol = file_symbol.items,
     };
     try a.file_by_path.put(a.arena, path, file);

@@ -15,8 +15,6 @@ const Node = Ast.Node;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const compat = @import("compat.zig");
-
 pub const Module = struct {
     name: []const u8,
     source: Source,
@@ -175,7 +173,7 @@ pub fn modules(arena: Allocator, io: Io, root: []const u8) ![]const Module {
     };
     var scan: Scan = .{
         .arena = arena,
-        .tree = try compat.parse(arena, source, .zig),
+        .tree = try Ast.parse(arena, source, .zig),
         .root = root,
     };
     try scan.run();
